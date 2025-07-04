@@ -28,6 +28,7 @@ This is a Python CLI tool for the Hedra API, which creates digital avatars and t
 - Python 3.6+
 - `requests` library: `pip install requests`
 - Audio player (optional): ffplay, mpg123, or mplayer
+- OpenCV (optional, for face selection): `pip install opencv-python`
 
 ### Running the Tool
 ```bash
@@ -89,6 +90,13 @@ Settings are stored in `~/.hedra.conf`:
 - Preview voices with `voice preview <name>`
 - Use local voice files from `assets/` directory
 
+### Face Selection (Multi-Person Images)
+- Interactive face selection with `--select-face` (shows ASCII layout)
+- Auto-select best face with `--auto-face` (largest/most prominent)
+- Preview faces without generating with `--preview-faces`
+- Manual coordinates with `--bounding-box "x,y"`
+- Requires OpenCV: `pip install opencv-python`
+
 ### Project Management
 - List recent generations with `project list`
 - Download completed generations with `project download <id>`
@@ -107,9 +115,11 @@ The tool includes comprehensive error handling:
 ## File Structure
 
 - `hedra` - Main CLI script
+- `face_selector.py` - Face detection and selection module
 - `assets/` - Local voice files for previews
 - `openapi.json` - API specification
 - `README.md` - User documentation
+- `plan.md` - Development plan and implementation strategy
 
 ## Development Notes
 
@@ -121,3 +131,6 @@ The tool includes comprehensive error handling:
 - Uses new asset-based upload system (create asset, then upload file)
 - Supports bounding box targeting for Character3 model
 - TTS and image generation happen as separate steps before video generation
+- Face selection with OpenCV for multi-person scenarios
+- ASCII art visualization for spatial face positioning
+- Graceful degradation when OpenCV not available

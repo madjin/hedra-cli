@@ -13,11 +13,19 @@ import subprocess
 from pathlib import Path
 import tempfile
 
+# Import face selection module (optional dependency)
+try:
+    from face_selector import select_face, preview_faces
+    FACE_SELECTION_AVAILABLE = True
+except ImportError:
+    FACE_SELECTION_AVAILABLE = False
+
 # Constants
-BASE_URL = "https://mercury.dev.dream-ai.com/api"
+BASE_URL = "https://api.hedra.com/web-app"
 CONFIG_FILE = os.path.expanduser("~/.hedra.conf")
 ASPECT_RATIO_OPTIONS = ["1:1", "16:9", "9:16"]
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+DEFAULT_AI_MODEL_ID = "d1dd37a3-e39a-4854-a298-6510289f9cf2"
 
 def load_config():
     """Load configuration from file or environment"""
@@ -26,7 +34,8 @@ def load_config():
         "base_url": os.environ.get("HEDRA_BASE_URL", BASE_URL),
         "default_aspect_ratio": "1:1",
         "default_output_dir": "outputs",
-        "assets_dir": ASSETS_DIR
+        "assets_dir": ASSETS_DIR,
+        "default_ai_model_id": DEFAULT_AI_MODEL_ID
     }
     
     if os.path.exists(CONFIG_FILE):
@@ -51,7 +60,7 @@ def save_config(config):
 
 def get_api_headers(config):
     """Get API headers with API key"""
-    return {"X-API-KEY": config["api_key"]}
+    return {"X-API-Key": config["api_key"]}
 
 def api_request(config, method, path, **kwargs):
     """Make an API request with error handling"""
@@ -97,8 +106,8 @@ def api_request(config, method, path, **kwargs):
 
 def get_voices(config):
     """Get available voices"""
-    response = api_request(config, "GET", "/v1/voices")
-    return response["supported_voices"]
+    response = api_request(config, "GET", "/public/assets", params={"type": "voice"})
+    return response
 
 def find_local_voice_file(voice_name):
     """Find a local voice file in the assets directory"""
@@ -152,7 +161,7 @@ def print_available_voices(config):
     
     for v in voices:
         name = v.get("name", "(Unnamed)")
-        vid = v["voice_id"]
+        vid = v["id"]
         service = v.get("service", "")
         premium = "✓" if v.get("premium", False) else ""
         local = "✓" if name in local_voice_names or any(name.lower() in file.lower() for file in local_voice_files) else ""
@@ -175,7 +184,7 @@ def play_voice_preview(config, voice_id_or_name):
     if not local_file:
         voices = get_voices(config)
         for voice in voices:
-            if voice["voice_id"] == voice_id_or_name:
+            if voice["id"] == voice_id_or_name:
                 # Found a matching voice ID, try to find local file with the voice name
                 if voice.get("name"):
                     local_file = find_local_voice_file(voice.get("name"))
@@ -218,7 +227,7 @@ def play_voice_preview(config, voice_id_or_name):
     
     found_voice = None
     for voice in voices:
-        if voice["voice_id"] == voice_id_or_name or (voice.get("name") and voice_id_or_name.lower() in voice.get("name", "").lower()):
+        if voice["id"] == voice_id_or_name or (voice.get("name") and voice_id_or_name.lower() in voice.get("name", "").lower()):
             found_voice = voice
             break
     
@@ -273,7 +282,7 @@ def resolve_voice_id(config, voice_name=None, voice_id=None):
     if voice_id:
         # Verify the voice_id exists
         for voice in voices:
-            if voice["voice_id"] == voice_id:
+            if voice["id"] == voice_id:
                 return voice_id
         print(f"❌ Voice ID '{voice_id}' not found")
         sys.exit(1)
@@ -281,29 +290,44 @@ def resolve_voice_id(config, voice_name=None, voice_id=None):
     if voice_name:
         for voice in voices:
             if voice.get("name") and voice_name.lower() in voice.get("name", "").lower():
-                return voice["voice_id"]
+                return voice["id"]
         print(f"❌ Voice name '{voice_name}' not found")
         sys.exit(1)
     
     # Default to first voice if none specified
-    return voices[0]["voice_id"]
+    return voices[0]["id"]
 
-def upload_image(config, image_path, aspect_ratio):
+def upload_image(config, image_path):
     """Upload an image file"""
     if not os.path.exists(image_path):
         print(f"❌ Image file not found: {image_path}")
         sys.exit(1)
         
     print(f"📤 Uploading image {image_path}...")
+    
+    # First create the asset
+    filename = os.path.basename(image_path)
+    create_response = api_request(
+        config,
+        "POST",
+        "/public/assets",
+        json={
+            "name": filename,
+            "type": "image"
+        }
+    )
+    asset_id = create_response['id']
+    
+    # Then upload the file
     with open(image_path, 'rb') as f:
-        response = api_request(
+        api_request(
             config, 
             "POST",
-            "/v1/portrait",
-            files={'file': f},
-            params={'aspect_ratio': aspect_ratio}
+            f"/public/assets/{asset_id}/upload",
+            files={'file': f}
         )
-    return response['url']
+    
+    return asset_id
 
 def upload_audio(config, audio_path):
     """Upload an audio file"""
@@ -312,66 +336,129 @@ def upload_audio(config, audio_path):
         sys.exit(1)
         
     print(f"📤 Uploading audio {audio_path}...")
+    
+    # First create the asset
+    filename = os.path.basename(audio_path)
+    create_response = api_request(
+        config,
+        "POST",
+        "/public/assets",
+        json={
+            "name": filename,
+            "type": "audio"
+        }
+    )
+    asset_id = create_response['id']
+    
+    # Then upload the file
     with open(audio_path, 'rb') as f:
-        response = api_request(
+        api_request(
             config, 
             "POST",
-            "/v1/audio",
+            f"/public/assets/{asset_id}/upload",
             files={'file': f}
         )
-    return response['url']
+    
+    return asset_id
 
 def generate_audio_payload(config, args, voice_id):
     """Generate the audio part of the payload"""
     if args.audio_file:
-        audio_url = upload_audio(config, args.audio_file)
-        return {"audioSource": "audio", "voiceUrl": audio_url}
+        audio_id = upload_audio(config, args.audio_file)
+        return {"audio_id": audio_id}
     elif args.text:
-        return {"audioSource": "tts", "text": args.text, "voiceId": voice_id}
+        # For TTS, we need to generate the audio first
+        tts_response = api_request(
+            config,
+            "POST",
+            "/public/generations",
+            json={
+                "type": "text_to_speech",
+                "voice_id": voice_id,
+                "text": args.text
+            }
+        )
+        # Wait for TTS completion
+        tts_result = wait_for_completion(config, tts_response['id'])
+        return {"audio_id": tts_response['asset_id']}
     else:
         print("❌ You must specify either --text or --audio-file")
         sys.exit(1)
 
 def generate_avatar_payload(config, args, voice_id):
     """Generate the complete avatar generation payload"""
-    payload = generate_audio_payload(config, args, voice_id)
-    payload["aspectRatio"] = args.aspect_ratio
+    payload = {
+        "type": "video",
+        "ai_model_id": getattr(args, 'ai_model_id', config.get('default_ai_model_id', DEFAULT_AI_MODEL_ID)),
+        "generated_video_inputs": {
+            "text_prompt": getattr(args, 'animation_prompt', 'A person speaking naturally'),
+            "aspect_ratio": args.aspect_ratio,
+            "duration_ms": getattr(args, 'duration_ms', 0)
+        }
+    }
+    
+    # Add audio
+    audio_info = generate_audio_payload(config, args, voice_id)
+    payload.update(audio_info)
 
+    # Add image
     if args.img:
-        payload["avatarImage"] = upload_image(config, args.img, args.aspect_ratio)
+        payload["start_keyframe_id"] = upload_image(config, args.img)
     elif args.img_prompt:
-        payload["avatarImageInput"] = {"prompt": args.img_prompt}
-        if args.seed is not None:
-            payload["avatarImageInput"]["seed"] = args.seed
+        # Generate image first
+        img_response = api_request(
+            config,
+            "POST",
+            "/public/generations",
+            json={
+                "type": "image",
+                "text_prompt": args.img_prompt,
+                "aspect_ratio": args.aspect_ratio,
+                "resolution": getattr(args, 'resolution', "1080p"),
+                "ai_model_id": getattr(args, 'ai_model_id', config.get('default_ai_model_id', DEFAULT_AI_MODEL_ID))
+            }
+        )
+        # Wait for image completion
+        img_result = wait_for_completion(config, img_response['id'])
+        payload["start_keyframe_id"] = img_response['asset_id']
     else:
         print("❌ You must provide --img or --img-prompt")
         sys.exit(1)
 
-    # Add animation prompt if specified
-    if hasattr(args, 'animation_prompt') and args.animation_prompt:
-        payload.setdefault("avatarImageInput", {})["prompt"] = args.animation_prompt
+    # Add bounding box target if specified
+    if hasattr(args, 'bounding_box') and args.bounding_box:
+        try:
+            # Parse bounding box coordinates
+            coords = [float(x.strip()) for x in args.bounding_box.split(',')]
+            if len(coords) != 2:
+                raise ValueError("Bounding box must have exactly 2 coordinates")
+            if not all(0 <= coord <= 1 for coord in coords):
+                raise ValueError("Bounding box coordinates must be between 0 and 1")
+            payload["generated_video_inputs"]["bounding_box_target"] = coords
+        except ValueError as e:
+            print(f"❌ Invalid bounding box format: {e}")
+            sys.exit(1)
 
     return payload
 
-def wait_for_completion(config, project_id, poll_interval=5, max_retries=100):
+def wait_for_completion(config, generation_id, poll_interval=5, max_retries=100):
     """Wait for a job to complete with a progress indicator"""
     print("⏳ Waiting for job completion...")
     
     for i in range(max_retries):
         try:
-            # Use the modified api_request without raise_for_status
-            response = api_request(config, "GET", f"/v1/projects/{project_id}", raise_for_status=False)
+            # Use the new generations status endpoint
+            response = api_request(config, "GET", f"/public/generations/{generation_id}/status", raise_for_status=False)
             if not response:
                 time.sleep(poll_interval)
                 continue
                 
             status = response.get('status', 'Unknown')
-            stage = response.get('stage', '')
             progress = response.get('progress', 0) or 0
             
             # Create a simple progress bar
             bar_length = 30
-            filled_length = int(bar_length * progress / 100)
+            filled_length = int(bar_length * progress * 100)  # progress is 0-1 now
             bar = '█' * filled_length + '░' * (bar_length - filled_length)
             
             # Calculate elapsed time
@@ -380,13 +467,13 @@ def wait_for_completion(config, project_id, poll_interval=5, max_retries=100):
             secs = elapsed % 60
             
             # Print status line
-            print(f"\r[{bar}] {progress:3.0f}% | Status: {status} {stage} | Time: {mins:02d}:{secs:02d}", end='')
+            print(f"\r[{bar}] {progress*100:3.0f}% | Status: {status} | Time: {mins:02d}:{secs:02d}", end='')
             
-            if status == "Completed":
+            if status == "complete":
                 print("\n✅ Generation completed!")
-                return response.get("videoUrl") or response.get("voiceUrl")
-            elif status == "Failed":
-                error_msg = response.get("errorMessage", "Unknown error")
+                return response.get("url")
+            elif status == "error":
+                error_msg = response.get("error_message", "Unknown error")
                 print(f"\n❌ Generation failed: {error_msg}")
                 sys.exit(1)
         except Exception as e:
@@ -437,63 +524,47 @@ def download_file(url, out_path):
         return False
 
 def list_projects(config, limit=10):
-    """List recent projects"""
-    response = api_request(config, "GET", "/v1/projects")
-    projects = response.get("projects", [])
+    """List recent generations"""
+    response = api_request(config, "GET", "/public/generations", params={"paging_params": {"limit": limit, "offset": 0}})
+    generations = response.get("data", [])
     
-    if not projects:
-        print("No projects found")
+    if not generations:
+        print("No generations found")
         return
     
-    # Sort by creation date, newest first
-    projects.sort(key=lambda p: p.get("createdAt", ""), reverse=True)
-    
-    # Limit the number of projects shown
-    projects = projects[:limit]
-    
-    print("\nRecent Projects:")
+    print("\nRecent Generations:")
     print("-" * 100)
-    print(f"{'ID':<36} {'CREATED':<20} {'STATUS':<10} {'TYPE':<15} {'VIDEO URL':<30}")
+    print(f"{'ID':<36} {'CREATED':<20} {'STATUS':<10} {'TYPE':<15} {'PROGRESS':<10}")
     print("-" * 100)
     
-    for p in projects:
-        project_id = p.get("id", "")
-        created_at = p.get("createdAt", "").replace("T", " ").replace("Z", "")[:19] if p.get("createdAt") else ""
-        status = p.get("status", "")
-        job_type = p.get("jobType", "")
+    for g in generations:
+        gen_id = g.get("id", "")
+        created_at = g.get("created_at", "").replace("T", " ").replace("Z", "")[:19] if g.get("created_at") else ""
+        status = g.get("status", "")
+        gen_type = g.get("type", "")
+        progress = g.get("progress", 0) * 100 if g.get("progress") else 0
         
-        # Handle None values for video URL
-        video_url = p.get("videoUrl", "")
-        if video_url is None:  # Explicitly check for None
-            video_url = ""
-        elif len(video_url) > 30:
-            video_url = video_url[:27] + "..."
-        
-        print(f"{project_id:<36} {created_at:<20} {status:<10} {job_type:<15} {video_url:<30}")
+        print(f"{gen_id:<36} {created_at:<20} {status:<10} {gen_type:<15} {progress:3.0f}%")
     
     print("-" * 100)
 
-def get_project(config, project_id):
-    """Get and display a project"""
-    response = api_request(config, "GET", f"/v1/projects/{project_id}")
+def get_project(config, generation_id):
+    """Get and display a generation"""
+    response = api_request(config, "GET", f"/public/generations/{generation_id}/status")
     
     if not response:
         return
     
-    print("\nProject Details:")
+    print("\nGeneration Details:")
     print("-" * 80)
-    print(f"Project ID:      {response.get('id', 'N/A')}")
-    print(f"Created:         {response.get('createdAt', 'N/A').replace('T', ' ').replace('Z', '')[:19] if response.get('createdAt') else 'N/A'}")
+    print(f"Generation ID:   {response.get('id', 'N/A')}")
+    print(f"Asset ID:        {response.get('asset_id', 'N/A')}")
+    print(f"Created:         {response.get('created_at', 'N/A').replace('T', ' ').replace('Z', '')[:19] if response.get('created_at') else 'N/A'}")
     print(f"Status:          {response.get('status', 'N/A')}")
-    print(f"Progress:        {response.get('progress', 0) or 0}%")
-    print(f"Stage:           {response.get('stage', 'N/A')}")
-    print(f"Job Type:        {response.get('jobType', 'N/A')}")
-    print(f"Video URL:       {response.get('videoUrl', 'N/A')}")
-    print(f"Image URL:       {response.get('avatarImageUrl', 'N/A')}")
-    print(f"Voice ID:        {response.get('voiceId', 'N/A')}")
-    print(f"Voice URL:       {response.get('voiceUrl', 'N/A')}")
-    print(f"Shared:          {'Yes' if response.get('shared', False) else 'No'}")
-    print(f"Error:           {response.get('errorMessage', 'None')}")
+    print(f"Progress:        {(response.get('progress', 0) or 0) * 100:.1f}%")
+    print(f"Type:            {response.get('type', 'N/A')}")
+    print(f"URL:             {response.get('url', 'N/A')}")
+    print(f"Error:           {response.get('error_message', 'None')}")
     print("-" * 80)
 
 def delete_project(config, project_id):
@@ -555,7 +626,7 @@ def interactive_mode(config):
         
         for i, voice in enumerate(display_voices):
             name = voice.get("name", "Unnamed")
-            vid = voice["voice_id"]
+            vid = voice["id"]
             local = " (local)" if name in local_voice_names or any(name.lower() in file.lower() for file in local_voice_files) else ""
             print(f"  [{i+1}] {name}{local} (ID: {vid})")
         
@@ -572,7 +643,7 @@ def interactive_mode(config):
             except ValueError:
                 print("❌ Please enter a number")
         
-        voice_id = display_voices[voice_idx]["voice_id"]
+        voice_id = display_voices[voice_idx]["id"]
         
         # Get audio source
         print("\n🔊 Audio Source:")
@@ -716,6 +787,18 @@ Examples:
   # Generate a character with an uploaded image and audio
   hedra generate --audio-file input.mp3 --img portrait.jpg
   
+  # Interactive face selection for multi-person images
+  hedra generate --text "Hello!" --img group_photo.jpg --select-face
+  
+  # Auto-select best face (largest/most prominent)
+  hedra generate --text "Hello!" --img photo.jpg --auto-face
+  
+  # Preview faces in image without generating
+  hedra generate --preview-faces --img photo.jpg
+  
+  # Manual bounding box coordinates
+  hedra generate --text "Hello!" --img photo.jpg --bounding-box "0.3,0.4"
+  
   # Run in interactive mode
   hedra interactive
   
@@ -780,6 +863,15 @@ Examples:
     generate_parser.add_argument("--aspect-ratio", "--ar", choices=ASPECT_RATIO_OPTIONS, default="1:1", help="Aspect ratio for the output")
     generate_parser.add_argument("--animation-prompt", "--ap", help="Animation prompt to use")
     generate_parser.add_argument("--seed", type=int, help="Seed for image generation")
+    generate_parser.add_argument("--bounding-box", "--bb", help="Bounding box coordinates (x,y) for primary speaker position (Character3 only). Values should be between 0 and 1.")
+    generate_parser.add_argument("--ai-model-id", help="AI model ID to use for generation")
+    generate_parser.add_argument("--duration-ms", type=int, default=0, help="Duration of the video in milliseconds")
+    generate_parser.add_argument("--resolution", default="1080p", help="Resolution for the video (e.g. 540p, 1080p, 1440p)")
+    
+    # Face selection arguments
+    generate_parser.add_argument("--select-face", action="store_true", help="Interactive face selection from image")
+    generate_parser.add_argument("--auto-face", action="store_true", help="Automatically select best detected face")
+    generate_parser.add_argument("--preview-faces", action="store_true", help="Preview detected faces without generating")
     
     # Interactive mode
     interactive_parser = subparsers.add_parser("interactive", help="Run in interactive mode")
@@ -859,12 +951,46 @@ def main():
     
     # Handle generate command
     elif args.command == "generate":
+        # Handle face preview mode
+        if args.preview_faces and args.img:
+            if FACE_SELECTION_AVAILABLE:
+                print("🔍 Analyzing faces in image...")
+                preview_faces(args.img)
+            else:
+                print("❌ Face selection not available. Install with: pip install opencv-python")
+            sys.exit(0)
+        
+        # Handle face selection
+        if (args.select_face or args.auto_face) and args.img:
+            if not FACE_SELECTION_AVAILABLE:
+                print("❌ Face selection not available. Install with: pip install opencv-python")
+                print("💡 Use manual --bounding-box x,y coordinates instead")
+                sys.exit(1)
+            
+            try:
+                if args.auto_face:
+                    print("🤖 Auto-detecting best face...")
+                    coords = select_face(args.img, mode='auto')
+                else:
+                    print("🎭 Interactive face selection...")
+                    coords = select_face(args.img, mode='interactive')
+                
+                if coords:
+                    args.bounding_box = f"{coords[0]:.3f},{coords[1]:.3f}"
+                    print(f"✅ Face selected: {args.bounding_box}")
+                else:
+                    print("❌ No face selected. Continuing without bounding box.")
+                    
+            except Exception as e:
+                print(f"❌ Face selection failed: {e}")
+                print("💡 Use manual --bounding-box x,y coordinates instead")
+        
         voice_id = resolve_voice_id(config, args.voice_name, args.voice_id)
         payload = generate_avatar_payload(config, args, voice_id)
         
         print("🚀 Starting generation request...")
-        response = api_request(config, "POST", "/v1/characters", json=payload)
-        job_id = response['jobId']
+        response = api_request(config, "POST", "/public/generations", json=payload)
+        job_id = response['id']
         
         print(f"Job ID: {job_id}")
         result_url = wait_for_completion(config, job_id, args.poll_interval, args.max_retries)
